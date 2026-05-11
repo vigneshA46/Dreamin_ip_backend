@@ -13,6 +13,7 @@ import asyncpg
 import json
 from urllib.parse import parse_qs
 from fastapi import FastAPI, WebSocket, APIRouter
+from candle_builder import OneMinuteCandleBuilder
 import asyncio
 from dhanhq import MarketFeed, DhanContext
 from dispatcher import publish
@@ -23,6 +24,8 @@ app = FastAPI()
 router = APIRouter()
 finder = FindInstrument()
 fno_df=load_fno_master()
+builder=OneMinuteCandleBuilder()
+builders={}
 
 DEPLOYMENT_STATUS_URL = "https://algoapi.dreamintraders.in/api/deployments/user/status"
 OPEN_TRADES_URL = "https://algoapi.dreamintraders.in/api/realtradegroups/opentrades"
@@ -359,9 +362,12 @@ def is_valid_token(token: str):
 
 
 def on_message(msg):
+    #print("ON MSG DATA ",msg)
     token = str(msg.get("security_id"))
 
-    if msg.get("ltp") is None:
+    ltp = msg.get("LTP") or msg.get("ltp")
+
+    if not ltp:
         return
 
     publish(token, msg)
@@ -387,14 +393,16 @@ def start_dhan_ws():
         dhan_context = DhanContext(client_id, access_token)
 
         instruments = []
-        instruments.append((MarketFeed.IDX, "13", MarketFeed.Quote))
+
+        instruments.append(
+            (MarketFeed.IDX, "13", MarketFeed.Quote)
+        )
 
         valid_tokens = []
+
         for t in list(tokens):
             if is_valid_token(t):
                 valid_tokens.append(t)
-            else:
-                print("Skipping invalid token:", t)
 
         instruments.extend([
             (MarketFeed.NSE_FNO, t, MarketFeed.Quote)
@@ -403,13 +411,38 @@ def start_dhan_ws():
 
         print("Starting WS with:", instruments)
 
-        feed = MarketFeed(dhan_context, instruments, "v2")
-
-        feed.on_message = on_message
-        feed.on_connect = on_connect
-        feed.on_close = on_close
+        feed = MarketFeed(
+            dhan_context,
+            instruments,
+            "v2"
+        )
 
         feed.run_forever()
+
+        print("WS CONNECTED")
+
+        while feed is not None:
+
+            try:
+                data = feed.get_data()
+                token = str(data["security_id"])
+                if data:
+
+                    token = str(data["security_id"])
+
+                    if token not in builders:
+                        builders[token] = OneMinuteCandleBuilder()
+
+                    candle = builders[token].process_tick(data)
+
+                    if candle:
+                        print("CANDLE:", token, candle)
+
+                    on_message(data)
+
+
+            except Exception as e:
+                print("DATA ERROR:", e)
 
     except Exception as e:
         print("WS ERROR:", e)
@@ -419,18 +452,19 @@ async def restart_ws():
 
     async with restart_lock:
 
-        if feed:
-            try:
-                print("Closing WS...")
-                await feed.disconnect()
-            except:
-                pass
+        feed = None
 
-            # wait for proper cleanup
-            await asyncio.sleep(3)
+        await asyncio.sleep(1)
+        print("Restarting WS...")
+
+        await asyncio.sleep(5)
 
         print("Starting new WS...")
-        loop.run_in_executor(None, start_dhan_ws)
+
+        loop.run_in_executor(
+            None,
+            start_dhan_ws
+        )
 
 @router.post("/add-token")
 async def add_token(exchange: str, token: str):
