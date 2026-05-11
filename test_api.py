@@ -13,7 +13,7 @@ import asyncpg
 import json
 from urllib.parse import parse_qs
 from fastapi import FastAPI, WebSocket, APIRouter
-from candle_builder import OneMinuteCandleBuilder
+#from candle_builder import OneMinuteCandleBuilder
 import asyncio
 from dhanhq import MarketFeed, DhanContext
 from dispatcher import publish
@@ -24,8 +24,8 @@ app = FastAPI()
 router = APIRouter()
 finder = FindInstrument()
 fno_df=load_fno_master()
-builder=OneMinuteCandleBuilder()
-builders={}
+#builder=OneMinuteCandleBuilder()
+#builders={}
 
 DEPLOYMENT_STATUS_URL = "https://algoapi.dreamintraders.in/api/deployments/user/status"
 OPEN_TRADES_URL = "https://algoapi.dreamintraders.in/api/realtradegroups/opentrades"
@@ -429,7 +429,7 @@ def start_dhan_ws():
                 if data:
 
                     token = str(data["security_id"])
-
+                    """
                     if token not in builders:
                         builders[token] = OneMinuteCandleBuilder()
 
@@ -437,6 +437,8 @@ def start_dhan_ws():
 
                     if candle:
                         print("CANDLE:", token, candle)
+                    """
+                    print("TICK:", token, data)
 
                     on_message(data)
 
