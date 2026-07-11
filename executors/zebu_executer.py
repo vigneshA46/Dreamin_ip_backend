@@ -77,7 +77,7 @@ async def zebu_order(user, signal):
                 "reason": signal["reason"]
             }
 
-            #print("Payload:",payload)
+            print("Payload:",payload)
 
             response = await asyncio.to_thread(requests.post, API_URL, json=payload)
 

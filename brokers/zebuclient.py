@@ -2,7 +2,7 @@ import requests
 import json
 import hashlib
 import time
-
+import pyotp
 
 class ZebuClient:
     def __init__(self, uid, password, api_key, vendor_code, factor2):
@@ -16,12 +16,17 @@ class ZebuClient:
         self.jKey = None
         self.actid = uid
 
+    
     # -------------------------
     # 🔐 Utility: SHA256
     # -------------------------
     def _sha256(self, data):
         return hashlib.sha256(data.encode()).hexdigest()
 
+
+    def _generate_totp(self):
+        totp = pyotp.TOTP(self.factor2)  # factor2 = BASE32 SECRET
+        return totp.now()
     # -------------------------
     # 🔐 LOGIN
     # -------------------------
@@ -31,10 +36,12 @@ class ZebuClient:
         pwd_hash = self._sha256(self.password)
         appkey_hash = self._sha256(f"{self.uid}|{self.api_key}")
 
+        otp = self._generate_totp()
+
         data = {
             "uid": self.uid,
             "pwd": pwd_hash,
-            "factor2": self.factor2,
+            "factor2": otp,
             "apkversion": "1.0.0",
             "imei": "12345678",
             "vc": self.vendor_code,
@@ -128,3 +135,4 @@ class ZebuClient:
             print("✅ Order Placed:", response.get("norenordno"))
 
         return response
+        
