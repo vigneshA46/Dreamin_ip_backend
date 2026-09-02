@@ -12,7 +12,8 @@ import hashlib
 import asyncpg
 import json
 from urllib.parse import parse_qs
-from fastapi import FastAPI, WebSocket, APIRouter , HTTPException
+from fastapi import FastAPI, WebSocket, APIRouter, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 from dhanhq import MarketFeed, DhanContext
 from dispatcher import publish
@@ -104,6 +105,7 @@ def parse_symbol(symbol: str):
         "option_type": opt_type,
         "expiry": expiry
     }
+    
 async def execute_exit(user, signal):
     broker = user["broker_name"]
 
@@ -318,4 +320,15 @@ async def recover_strategy(req: RecoverStrategyRequest):
 
 
 app = FastAPI()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "https://hasan3324algoadmin.dreamintraders.in"
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 app.include_router(router)
