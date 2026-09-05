@@ -37,9 +37,6 @@ class ExitRequest(BaseModel):
 class RecoverStrategyRequest(BaseModel):
     strategy_id: str
 
-
-
-
 def log_trade_event(
     event_type,
     leg_name,
@@ -78,10 +75,6 @@ def log_trade_event(
 
     # 🔥 NON-BLOCKING
     trade_log_queue.put(payload)
-
-
-
-
 
 
 def parse_symbol(symbol: str):
@@ -232,7 +225,7 @@ async def recover_strategy(req: RecoverStrategyRequest):
                     "user_id": trade["user_id"],
                     "broker_name": trade["broker_name"],
                     "broker_account_id": trade["broker_id"],
-                    "multiplier": 1,
+                    "multiplier": trade["multiplier"] if trade["multiplier"] is not None else 1,
                     "credentials": trade["credentials"]
                 }
 
@@ -297,7 +290,7 @@ async def recover_strategy(req: RecoverStrategyRequest):
                     "symbol": trade["symbol"],
                     "status": "EXITED"
                 })
-
+                                                         
             except Exception as e:
 
                 results.append({
@@ -332,3 +325,4 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(router)
+ 
