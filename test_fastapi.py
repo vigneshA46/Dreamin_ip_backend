@@ -17,7 +17,6 @@ from fastapi.middleware.cors import CORSMiddleware
 import asyncio
 from dhanhq import MarketFeed, DhanContext
 from dispatcher import publish
-from dhan_token import get_access_token
 import os
 from queue import Queue
 
@@ -47,7 +46,8 @@ async def exit_user_open_trades(req: ExitUserOpenTradesRequest):
         # Fetch user's open trades
         ########################################################
 
-        open_res = requests.post(
+
+        open_res = requests.get(
             STRTEGY_OPEN_TRADE_USER_URL,
             json={
                 "user_id": req.user_id,
