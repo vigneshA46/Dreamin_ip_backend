@@ -22,10 +22,264 @@ import os
 from queue import Queue
 
 
+STRTEGY_OPEN_TRADE_USER_URL = "https://dreaminalgo-backend-production.up.railway.app/api/realtradegroups/opentrades"
 STRATEGY_OPEN_TRADES_URL = "https://algoapi.dreamintraders.in/api/realtradegroups/strategy-opentrades"
+
 fno_df=load_fno_master()
 finder = FindInstrument()
 trade_log_queue = Queue()
+
+
+
+class ExitUserOpenTradesRequest(BaseModel):
+    user_id: str
+    strategy_id: str
+    broker_id: str
+    date: str
+
+
+@router.post("/exit-user-open-trades")
+async def exit_user_open_trades(req: ExitUserOpenTradesRequest):
+
+    try:
+
+        ########################################################
+        # Fetch user's open trades
+        ########################################################
+
+        open_res = requests.post(
+            STRTEGY_OPEN_TRADE_USER_URL,
+            json={
+                "user_id": req.user_id,
+                "strategy_id": req.strategy_id,
+                "broker_id": req.broker_id,
+                "date": req.date
+            }
+        )
+
+        print("===================================")
+        print("Fetching open trades for user")
+        print("User ID      :", req.user_id)
+        print("Strategy ID  :", req.strategy_id)
+        print("Broker ID    :", req.broker_id)
+        print("Date         :", req.date)
+        print("Response     :", open_res.text)
+
+        if open_res.status_code != 200:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to fetch open trades: {open_res.text}"
+            )
+
+        open_positions = open_res.json()
+
+        ########################################################
+        # No open trades
+        ########################################################
+
+        if not open_positions:
+
+            return {
+                "success": True,
+                "message": "No open trades found.",
+                "results": []
+            }
+
+        results = []
+
+        ########################################################
+        # Exit every open trade
+        ########################################################
+
+        for trade in open_positions:
+
+            try:
+
+                ################################################
+                # Parse Symbol
+                ################################################
+
+                parsed = parse_symbol(trade["symbol"])
+
+                print("===================================")
+                print("Original Symbol :", trade["symbol"])
+                print("Parsed          :", parsed)
+                print("Strike          :", parsed["strike"])
+                print("Option          :", parsed["option_type"])
+                print("Expiry          :", parsed["expiry"])
+
+                ################################################
+                # Find Security ID
+                ################################################
+
+                option_row = find_option_security(
+                    fno_df,
+                    parsed["strike"],
+                    parsed["option_type"],
+                    parsed["expiry"],
+                    parsed["underlying"]
+                )
+
+                security_id = option_row["SECURITY_ID"]
+
+                ################################################
+                # Find Token
+                ################################################
+
+                option = finder.get_option(
+                    parsed["underlying"],
+                    parsed["strike"],
+                    parsed["option_type"]
+                )
+
+                token = option["token"]
+
+                if not token:
+                    raise Exception("Token not found")
+
+                ################################################
+                # Opposite Side
+                ################################################
+
+                exit_side = (
+                    "SELL"
+                    if trade["side"] == "BUY"
+                    else "BUY"
+                )
+
+                ################################################
+                # User Object
+                ################################################
+
+                user = {
+                    "user_id": trade["user_id"],
+
+                    "broker_name": trade["broker_name"],
+
+                    "broker_account_id": trade["broker_id"],
+
+                    "multiplier": (
+                        trade["multiplier"]
+                        if trade["multiplier"] is not None
+                        else 1
+                    ),
+
+                    "credentials": trade["credentials"]
+                }
+
+                ################################################
+                # Exit Signal
+                ################################################
+
+                signal = {
+
+                    "strategy_id": trade["strategy_id"],
+
+                    "option": parsed["option_type"],
+
+                    "side": exit_side,
+
+                    "quantity": trade["quantity"],
+
+                    "security_id": security_id,
+
+                    "token": token,
+
+                    "symbol": trade["symbol"],
+
+                    "exchange": "NFO",
+
+                    "expiry": parsed["expiry"],
+
+                    "strike": parsed["strike"],
+
+                    "zebusymbol": parsed["underlying"],
+
+                    "antsymbol": parsed["underlying"],
+
+                    "is_ce": parsed["option_type"] == "CE",
+
+                    "is_fno": True,
+
+                    "reason": "USER OPEN TRADES EXIT",
+
+                    "leg_name": trade["leg_name"],
+
+                    "event_type": "EXIT",
+
+                    "trade_id": trade["trade_id"],
+
+                    "price": float(trade["price"]),
+
+                    "pnl": float(trade.get("pnl", 0)),
+
+                    "cum_pnl": float(trade.get("cum_pnl", 0))
+                }
+
+                ################################################
+                # Execute Exit In Broker
+                ################################################
+
+                print("Executing exit")
+                print("User      :", trade["user_id"])
+                print("Broker    :", trade["broker_name"])
+                print("Symbol    :", trade["symbol"])
+                print("Side      :", exit_side)
+                print("Quantity  :", trade["quantity"])
+
+                await execute_exit(user, signal)
+
+                ################################################
+                # Success
+                ################################################
+
+                results.append({
+                    "trade_id": trade["trade_id"],
+                    "symbol": trade["symbol"],
+                    "status": "EXITED"
+                })
+
+            except Exception as e:
+
+                ################################################
+                # Individual trade failure
+                ################################################
+
+                print(
+                    f"Failed to exit trade "
+                    f"{trade.get('trade_id')}: {e}"
+                )
+
+                results.append({
+                    "trade_id": trade.get("trade_id"),
+                    "symbol": trade.get("symbol"),
+                    "status": "FAILED",
+                    "error": str(e)
+                })
+
+        ########################################################
+        # Final Response
+        ########################################################
+
+        return {
+            "success": True,
+            "message": "User open trades exit completed.",
+            "results": results
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+
+        print("User open trades exit error:", e)
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
+
+
 
 
 class ExitRequest(BaseModel):
