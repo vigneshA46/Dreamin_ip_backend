@@ -1,23 +1,12 @@
-import requests
+import threading
 import pandas as pd
 import pytz
 from io import StringIO
-from datetime import datetime
 from dotenv import load_dotenv
-import os
-from dhan_token import get_access_token
+from dhan_token import dhan_request
 
 
 load_dotenv()
-
-ACCESS_TOKEN= get_access_token()
-
-
-
-HEADERS = {
-    "Content-Type": "application/json",
-    "access-token": ACCESS_TOKEN
-}
 
 IDX_INTRADAY_URL = "https://api.dhan.co/v2/charts/intraday"
 FNO_MASTER_URL   = "https://api.dhan.co/v2/instrument/NSE_FNO"
@@ -34,7 +23,7 @@ IST = pytz.timezone("Asia/Kolkata")
 def load_fno_master() -> pd.DataFrame:
     print("...downloading FNO master")
 
-    r = requests.get(FNO_MASTER_URL, headers={"access-token": ACCESS_TOKEN})
+    r = dhan_request("GET", FNO_MASTER_URL, timeout=60)
     r.raise_for_status()
 
     # ✅ Use header from API (IMPORTANT)
@@ -49,6 +38,29 @@ def load_fno_master() -> pd.DataFrame:
     df["SM_EXPIRY_DATE"] = pd.to_datetime(df["SM_EXPIRY_DATE"], errors="coerce")
 
     return df
+
+
+
+class FnoMaster:
+    """
+    Holds the FNO master and lets the daily reset swap in a fresh copy.
+    Always read .df at use time - never keep the DataFrame around -
+    so new weekly contracts show up without a redeploy.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._df = load_fno_master()
+
+    @property
+    def df(self):
+        return self._df
+
+    def reload(self):
+        df = load_fno_master()
+        with self._lock:
+            self._df = df
+        print(f"...FNO master reloaded ({len(df)} rows)")
 
 
 

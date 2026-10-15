@@ -1,32 +1,37 @@
-from test_api import router   
+from fastapi import FastAPI, APIRouter, HTTPException, Header
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import requests
 import re
 from datetime import datetime
 from find_instrument import FindInstrument
-from find_security import load_fno_master, find_option_security
+from find_security import FnoMaster, find_option_security
 import os
-from fastapi.responses import RedirectResponse
-import httpx
-import hashlib
-import asyncpg
-import json
-from urllib.parse import parse_qs
-from fastapi import FastAPI, WebSocket, APIRouter, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
 import asyncio
-from dhanhq import MarketFeed, DhanContext
-from dispatcher import publish
-import os
-from queue import Queue
+from typing import Optional
+from exit_engine.exit_models import StartMonitorRequest
+from exit_engine.exit_manager import ExitManager
+from exit_engine.history import load_history
+from exit_engine.market_feed import MarketFeedService
+from exit_engine.daily_reset import DailyReset
+from dhan_token import token_status
 
+
+router = APIRouter()
 
 STRTEGY_OPEN_TRADE_USER_URL = "https://dreaminalgo-backend-production.up.railway.app/api/realtradegroups/opentrades"
 STRATEGY_OPEN_TRADES_URL = "https://algoapi.dreamintraders.in/api/realtradegroups/strategy-opentrades"
 
-fno_df=load_fno_master()
+# Generates the first Dhan token (in memory) while downloading the master
+fno_master = FnoMaster()
 finder = FindInstrument()
-trade_log_queue = Queue()
+exit_manager = ExitManager(fno_master, history_loader=load_history)
+market_feed = MarketFeedService(fno_master)
+
+# 08:30 every day: new Dhan token + fresh FNO master (no daily redeploy)
+daily_reset = DailyReset(fno_master, on_reset=exit_manager.last_ltp.clear)
+
+EXIT_ENGINE_SECRET = os.getenv("EXIT_ENGINE_SECRET", "")
 
 
 
@@ -113,7 +118,7 @@ async def exit_user_open_trades(req: ExitUserOpenTradesRequest):
                 ################################################
 
                 option_row = find_option_security(
-                    fno_df,
+                    fno_master.df,
                     parsed["strike"],
                     parsed["option_type"],
                     parsed["expiry"],
@@ -282,54 +287,8 @@ async def exit_user_open_trades(req: ExitUserOpenTradesRequest):
 
 
 
-class ExitRequest(BaseModel):
-    user_id: str
-    strategy_id: str
-    broker_account_id: str
-    date: str
-
 class RecoverStrategyRequest(BaseModel):
     strategy_id: str
-
-def log_trade_event(
-    event_type,
-    leg_name,
-    token,
-    symbol,
-    side,
-    lot,
-    price,
-    reason,
-    pnl,
-    cum_pnl,
-    strategy_id,
-
-        ):
-    payload = {
-        "run_id": strategy_id,
-        "strategy_id": strategy_id,
-        "trade_id": strategy_id,
-
-        "event_type": event_type,
-        "leg_name": leg_name,
-        "token": int(token),
-        "symbol": symbol,
-
-        "side": side,
-        "lots": lot,
-        "quantity": lot * 65,
-
-        "price": float(price),  # 🔥 safety
-
-        "reason": reason,
-        "deployed_by": strategy_id,
-        "pnl": str(pnl),
-        "cum_pnl": str(cum_pnl),
-    }
-
-    # 🔥 NON-BLOCKING
-    trade_log_queue.put(payload)
-
 
 def parse_symbol(symbol: str):
     match = re.match(r"([A-Z]+)(\d{2})([A-Z]{3})(\d+)(CE|PE)", symbol)
@@ -441,7 +400,7 @@ async def recover_strategy(req: RecoverStrategyRequest):
                 ########################################################
 
                 option_row = find_option_security(
-                    fno_df,
+                    fno_master.df,
                     parsed["strike"],
                     parsed["option_type"],
                     parsed["expiry"],
@@ -564,6 +523,73 @@ async def recover_strategy(req: RecoverStrategyRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+########################################################
+# EXIT MONITOR (called by Express only)
+########################################################
+
+def verify_exit_engine_secret(secret):
+    if EXIT_ENGINE_SECRET and secret != EXIT_ENGINE_SECRET:
+        raise HTTPException(status_code=401, detail="Invalid exit engine secret")
+
+
+@router.post("/exit-monitor/start")
+async def start_exit_monitor(
+    req: StartMonitorRequest,
+    x_exit_engine_secret: Optional[str] = Header(default=None)
+):
+    verify_exit_engine_secret(x_exit_engine_secret)
+
+    try:
+        result = await exit_manager.start(req)
+
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    except Exception as e:
+        print("Exit monitor start error:", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {"success": True, **result}
+
+
+@router.post("/exit-monitor/{monitor_id}/stop")
+async def stop_exit_monitor(
+    monitor_id: str,
+    x_exit_engine_secret: Optional[str] = Header(default=None)
+):
+    verify_exit_engine_secret(x_exit_engine_secret)
+
+    stopped = exit_manager.stop(monitor_id)
+
+    return {
+        "success": True,
+        "stopped": stopped,
+        "message": "Monitor stopped" if stopped else "Monitor was not running"
+    }
+
+
+@router.get("/exit-monitor/active")
+async def active_exit_monitors(
+    x_exit_engine_secret: Optional[str] = Header(default=None)
+):
+    verify_exit_engine_secret(x_exit_engine_secret)
+
+    return {"success": True, "monitors": exit_manager.active()}
+
+
+@router.get("/exit-monitor/feed")
+async def exit_monitor_feed_status(
+    x_exit_engine_secret: Optional[str] = Header(default=None)
+):
+    verify_exit_engine_secret(x_exit_engine_secret)
+
+    return {
+        "success": True,
+        "feed": market_feed.status,
+        "daily_reset": daily_reset.status,
+        "dhan_token": token_status(),
+    }
+
 
 
 app = FastAPI()
@@ -580,3 +606,15 @@ app.add_middleware(
 )
 app.include_router(router)
  
+
+
+@app.on_event("startup")
+async def start_market_feed():
+    market_feed.start()
+    daily_reset.start()
+
+    # keep references so the tasks aren't garbage collected
+    app.state.background_tasks = [
+        asyncio.create_task(exit_manager.recover()),
+        asyncio.create_task(exit_manager.run_auto_close()),
+    ]

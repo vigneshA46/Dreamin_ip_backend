@@ -156,11 +156,39 @@ threading.Thread(target=refresh_holidays, daemon=True).start()
 threading.Thread(target=_auto_manager, daemon=True).start() """
 
 
+import threading
+
 subscriptions = {}
+_lock = threading.Lock()
+
 
 def subscribe(token, handler):
-    subscriptions.setdefault(token, []).append(handler)
+    token = str(token)
+    with _lock:
+        handlers = subscriptions.setdefault(token, [])
+        if handler not in handlers:
+            handlers.append(handler)
+
+
+def unsubscribe(token, handler):
+    token = str(token)
+    with _lock:
+        handlers = subscriptions.get(token)
+        if handlers and handler in handlers:
+            handlers.remove(handler)
+            if not handlers:
+                del subscriptions[token]
+
 
 def publish(token, data):
-    for handler in subscriptions.get(token, []):
-        handler(token, data)
+    token = str(token)
+    # Copy so handlers can unsubscribe themselves while being called
+    with _lock:
+        handlers = list(subscriptions.get(token, []))
+
+    for handler in handlers:
+        try:
+            handler(token, data)
+        except Exception as e:
+            # One broken handler must not kill the feed for the others
+            print(f"Dispatcher handler error [{token}]:", e)
