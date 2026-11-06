@@ -187,9 +187,15 @@ class ExitManager:
         relation = "above" if (config.tracking_source == "INDEX" and config.option_type == "PE") else "below"
         source = "NIFTY" if config.tracking_source == "INDEX" else option["symbol"]
 
+        if config.indicator == "HALFTREND":
+            direction = "up" if relation == "above" else "down"
+            condition = f"HalfTrend trend is {direction}"
+        else:
+            condition = f"closed {relation} {config.indicator}"
+
         message = (
             f"{source} {config.timeframe}m candle {candle['timestamp']} "
-            f"closed {relation} {config.indicator} "
+            f"{condition} "
             f"(close {float(candle['close']):.2f}, {config.indicator} {indicator_value:.2f}). "
             f"Exit SELL {config.quantity} {option['symbol']} @ {price if price is not None else 'MKT'}"
         )

@@ -21,6 +21,11 @@ class ExitMonitor:
         INDEX tracking + CE  : close < indicator
         INDEX tracking + PE  : close > indicator
 
+    HalfTrend goes by its trend instead of the line:
+        OPTION tracking      : trend is DOWN
+        INDEX tracking + CE  : trend is DOWN
+        INDEX tracking + PE  : trend is UP
+
     The monitor only DETECTS the exit. Placing the order is the
     manager's job (on_exit callback).
     """
@@ -94,7 +99,15 @@ class ExitMonitor:
         if indicator_value is None:
             return False
 
-        if self.config.tracking_source == "INDEX" and self.config.option_type == "PE":
+        exit_when_up = (
+            self.config.tracking_source == "INDEX" and self.config.option_type == "PE"
+        )
+
+        trend = getattr(self.indicator, "trend", None)
+        if trend is not None:
+            return trend == ("UP" if exit_when_up else "DOWN")
+
+        if exit_when_up:
             return close > indicator_value
 
         return close < indicator_value
@@ -186,6 +199,7 @@ class ExitMonitor:
             "timeframe": self.config.timeframe,
             "indicator": self.config.indicator,
             "indicator_value": self.indicator.value,
+            "indicator_trend": getattr(self.indicator, "trend", None),
             "last_candle": self.last_candle,
             "candles_processed": self.candles_processed,
             "active": self.active,

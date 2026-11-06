@@ -31,7 +31,7 @@ class StartMonitorRequest(BaseModel):
     quantity: int = Field(gt=0)
     timeframe: int = Field(gt=0)           # minutes
 
-    indicator: Literal["EMA9", "EMA20", "PARABOLIC_SAR"]
+    indicator: Literal["EMA9", "EMA20", "PARABOLIC_SAR", "HALFTREND"]
     indicator_period: Optional[int] = Field(default=None, gt=0)
 
     tracking_source: Literal["INDEX", "OPTION"]

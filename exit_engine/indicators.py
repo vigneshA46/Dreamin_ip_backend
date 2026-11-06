@@ -10,6 +10,8 @@ Every indicator has the same interface so ExitMonitor doesn't care which one it 
 candle = {"open", "high", "low", "close", ...}
 """
 
+from collections import deque
+
 
 class EMAIndicator:
     """
@@ -173,6 +175,122 @@ class ParabolicSARIndicator:
         self._prev_close = close
 
 
+class HalfTrendIndicator:
+    """
+    HalfTrend [everget], ported from the TradingView script.
+
+    .value = the HalfTrend line, .trend = "UP" / "DOWN" (None until ready)
+
+    highPrice / lowPrice = highest high / lowest low of the last `amplitude` candles
+    highma / lowma       = SMA of highs / lows over `amplitude`
+
+    Waiting to flip down : maxLow = max(lowPrice, maxLow)
+                           flip when highma < maxLow and close < previous low
+    Waiting to flip up   : minHigh = min(highPrice, minHigh)
+                           flip when lowma > minHigh and close > previous high
+
+    Line: up only rises, down only falls, and a flip starts from the
+    other side's last value. The script's ATR only draws the channels
+    and arrows, it doesn't affect the trend or the line, so it's left out.
+    """
+
+    def __init__(self, amplitude=2):
+        if amplitude <= 0:
+            raise ValueError("HalfTrend amplitude must be > 0")
+
+        self.amplitude = amplitude
+        self.value = None
+
+        self._is_down = False       # script's trend (False = 0 = up)
+        self._next_down = False     # script's nextTrend
+        self._max_low = None
+        self._min_high = None
+        self._up = None
+        self._down = None
+
+        self._highs = deque(maxlen=amplitude)
+        self._lows = deque(maxlen=amplitude)
+        self._prev_high = None
+        self._prev_low = None
+
+    @property
+    def ready(self):
+        return self.value is not None
+
+    @property
+    def trend(self):
+        if self.value is None:
+            return None
+        return "DOWN" if self._is_down else "UP"
+
+    def seed(self, candles):
+        for candle in candles:
+            self.update(candle)
+        return self.value
+
+    def update(self, candle):
+        high = float(candle["high"])
+        low = float(candle["low"])
+        close = float(candle["close"])
+
+        prev_high = self._prev_high if self._prev_high is not None else high
+        prev_low = self._prev_low if self._prev_low is not None else low
+
+        if self._max_low is None:
+            self._max_low = prev_low
+            self._min_high = prev_high
+
+        self._highs.append(high)
+        self._lows.append(low)
+        self._prev_high = high
+        self._prev_low = low
+
+        # Not enough candles for the SMAs yet
+        if len(self._highs) < self.amplitude:
+            return None
+
+        high_price = max(self._highs)
+        low_price = min(self._lows)
+        high_ma = sum(self._highs) / self.amplitude
+        low_ma = sum(self._lows) / self.amplitude
+
+        was_down = self._is_down
+
+        if self._next_down:
+            self._max_low = max(low_price, self._max_low)
+
+            if high_ma < self._max_low and close < prev_low:
+                self._is_down = True
+                self._next_down = False
+                self._min_high = high_price
+        else:
+            self._min_high = min(high_price, self._min_high)
+
+            if low_ma > self._min_high and close > prev_high:
+                self._is_down = False
+                self._next_down = True
+                self._max_low = low_price
+
+        if not self._is_down:
+            if was_down:
+                self._up = self._down
+            else:
+                self._up = (
+                    self._max_low if self._up is None else max(self._max_low, self._up)
+                )
+            self.value = self._up
+        else:
+            if not was_down:
+                self._down = self._up
+            else:
+                self._down = (
+                    self._min_high if self._down is None else min(self._min_high, self._down)
+                )
+            self.value = self._down
+
+        return self.value
+
+
 EMA_PERIODS = {
     "EMA9": 9,
     "EMA20": 20,
@@ -182,7 +300,7 @@ EMA_PERIODS = {
 def create_indicator(indicator, indicator_period=None):
     """
     Build an indicator from the exit_monitors row values.
-    indicator_period overrides the default EMA period if given.
+    indicator_period overrides the EMA period / HalfTrend amplitude if given.
     """
 
     if indicator in EMA_PERIODS:
@@ -190,6 +308,9 @@ def create_indicator(indicator, indicator_period=None):
 
     if indicator == "PARABOLIC_SAR":
         return ParabolicSARIndicator()
+
+    if indicator == "HALFTREND":
+        return HalfTrendIndicator(indicator_period or 2)
 
     raise ValueError(f"Unsupported indicator: {indicator}")
  
