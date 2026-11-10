@@ -15,6 +15,7 @@ from exit_engine.history import load_history
 from exit_engine.market_feed import MarketFeedService
 from exit_engine.daily_reset import DailyReset
 from dhan_token import token_status
+from dispatcher import clear_last_prices
 
 
 router = APIRouter()
@@ -29,7 +30,12 @@ exit_manager = ExitManager(fno_master, history_loader=load_history)
 market_feed = MarketFeedService(fno_master)
 
 # 08:30 every day: new Dhan token + fresh FNO master (no daily redeploy)
-daily_reset = DailyReset(fno_master, on_reset=exit_manager.last_ltp.clear)
+def clear_price_caches():
+    exit_manager.last_ltp.clear()
+    clear_last_prices()
+
+
+daily_reset = DailyReset(fno_master, on_reset=clear_price_caches)
 
 EXIT_ENGINE_SECRET = os.getenv("EXIT_ENGINE_SECRET", "")
 

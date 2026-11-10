@@ -161,6 +161,17 @@ import threading
 subscriptions = {}
 _lock = threading.Lock()
 
+# Latest traded price per token (so a new exit monitor can check it straight away)
+last_prices = {}
+
+
+def get_last_price(token):
+    return last_prices.get(str(token))
+
+
+def clear_last_prices():
+    last_prices.clear()
+
 
 def subscribe(token, handler):
     token = str(token)
@@ -182,6 +193,14 @@ def unsubscribe(token, handler):
 
 def publish(token, data):
     token = str(token)
+
+    try:
+        ltp = float(data["LTP"])
+        if ltp > 0:
+            last_prices[token] = ltp
+    except (KeyError, TypeError, ValueError):
+        pass
+
     # Copy so handlers can unsubscribe themselves while being called
     with _lock:
         handlers = list(subscriptions.get(token, []))

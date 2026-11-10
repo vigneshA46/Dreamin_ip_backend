@@ -14,10 +14,11 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from dispatcher import subscribe, unsubscribe
+from dispatcher import subscribe, unsubscribe, get_last_price
 from exit_engine.exit_monitor import ExitMonitor
 from exit_engine.broker_exit import resolve_option, validate_quantity, place_exit_order
 from exit_engine.exit_models import StartMonitorRequest
+from exit_engine.price_rules import fmt
 
 
 EXPRESS_API_URL = os.getenv("EXPRESS_API_URL", "https://algoapi.dreamintraders.in")
@@ -79,15 +80,23 @@ class ExitManager:
 
         validate_quantity(config.quantity, option["lot_size"])
 
-        if config.tracking_source == "OPTION":
-            watch_token = option["security_id"]
-        else:
-            watch_token = config.index_security_id
+        def token_for(source):
+            return option["security_id"] if source == "OPTION" else config.index_security_id
 
-        monitor = ExitMonitor(config, watch_token, on_exit=self._on_exit_signal)
+        # chart the indicator reads candles from / chart the price levels are checked on
+        watch_token = token_for(config.tracking_source) if config.indicator_enabled else None
+        price_token = token_for(config.price_source) if config.price_exit_type != "NONE" else None
 
-        # Warm-up (network call -> keep it off the event loop)
-        if self.history_loader:
+        monitor = ExitMonitor(
+            config,
+            watch_token,
+            on_exit=self._on_exit_signal,
+            on_sl_moved=self._on_sl_moved,
+            price_token=price_token,
+        )
+
+        # Indicator warm-up (network call -> keep it off the event loop)
+        if config.indicator_enabled and self.history_loader:
             history, in_progress = await asyncio.to_thread(
                 self.history_loader,
                 watch_token,
@@ -106,25 +115,43 @@ class ExitManager:
 
         # Option LTP is needed for the exit price even when tracking the index
         subscribe(option["security_id"], self._track_ltp)
-        subscribe(watch_token, monitor.on_tick)
+
+        for token in monitor.tokens():
+            subscribe(token, monitor.on_tick)
+
+        # Target / SL already crossed -> exit right away on the latest price
+        crossed_now = False
+
+        if price_token is not None:
+            last_price = get_last_price(price_token)
+
+            if last_price is not None:
+                crossed_now = monitor.check_price(last_price)
 
         print(
-            f"[ExitManager] STARTED {config.monitor_id} "
-            f"{option['symbol']} watch={watch_token} "
-            f"{config.indicator}={monitor.indicator.value}"
+            f"[ExitManager] STARTED {config.monitor_id} {option['symbol']} "
+            f"indicator={config.indicator if config.indicator_enabled else 'off'} "
+            f"price_exit={config.price_exit_type}"
         )
+
+        warnings = []
+
+        if condition_met:
+            warnings.append("Exit condition is already met - will exit on the next completed candle")
+
+        if crossed_now:
+            warnings.append("Target / stop loss level is already crossed - exiting now")
 
         return {
             "monitor_id": config.monitor_id,
             "symbol": option["symbol"],
             "security_id": option["security_id"],
             "watch_token": watch_token,
-            "indicator_value": monitor.indicator.value,
-            "indicator_ready": monitor.indicator.ready,
-            "warning": (
-                "Exit condition is already met - will exit on the next completed candle"
-                if condition_met else None
-            ),
+            "price_token": price_token,
+            "indicator_value": monitor.indicator.value if monitor.indicator else None,
+            "indicator_ready": monitor.indicator.ready if monitor.indicator else None,
+            "current_sl": monitor.price_rules.sl if monitor.price_rules else None,
+            "warning": " | ".join(warnings) if warnings else None,
         }
 
     # ---------------------------------------------------------
@@ -145,7 +172,9 @@ class ExitManager:
 
         self.monitors.pop(monitor_id, None)
         monitor.stop()
-        unsubscribe(monitor.watch_token, monitor.on_tick)
+
+        for token in monitor.tokens():
+            unsubscribe(token, monitor.on_tick)
 
         print(f"[ExitManager] STOPPED {monitor_id}")
         return True
@@ -159,17 +188,38 @@ class ExitManager:
         if ltp:
             self.last_ltp[token] = float(ltp)
 
-    def _on_exit_signal(self, monitor, candle, indicator_value):
-        """Runs on the WebSocket thread -> hand the order to the event loop."""
+    def _on_sl_moved(self, monitor, new_sl, ltp):
+        """Trailing SL moved (WebSocket thread) -> save it so a restart resumes from it."""
 
-        unsubscribe(monitor.watch_token, monitor.on_tick)
+        print(f"[ExitManager] {monitor.monitor_id} trailing SL -> {fmt(new_sl)} (LTP {ltp:.2f})")
 
         asyncio.run_coroutine_threadsafe(
-            self._execute_exit(monitor, candle, indicator_value),
+            self._save_trailing_sl(monitor.monitor_id, new_sl, ltp),
             self.loop,
         )
 
-    async def _execute_exit(self, monitor, candle, indicator_value):
+    async def _save_trailing_sl(self, monitor_id, new_sl, ltp):
+        await self._call_express(
+            "POST",
+            f"/api/exitmoniter/{monitor_id}/engine-state",
+            {
+                "current_sl": new_sl,
+                "message": f"Trailing SL moved to {fmt(new_sl)} (LTP {ltp:.2f})",
+            },
+        )
+
+    def _on_exit_signal(self, monitor, trigger):
+        """Runs on the WebSocket thread -> hand the order to the event loop."""
+
+        for token in monitor.tokens():
+            unsubscribe(token, monitor.on_tick)
+
+        asyncio.run_coroutine_threadsafe(
+            self._execute_exit(monitor, trigger),
+            self.loop,
+        )
+
+    async def _execute_exit(self, monitor, trigger):
         monitor_id = monitor.monitor_id
         entry = self.monitors.pop(monitor_id, None)
 
@@ -179,24 +229,39 @@ class ExitManager:
         config = monitor.config
         option = entry["option"]
 
-        # Exit price = option LTP (candle close is the index value when tracking INDEX)
+        reason = trigger["reason"]
+        candle = trigger.get("candle")
+
+        # Exit price = option LTP (an index candle / index LTP is not the option's price)
         price = self.last_ltp.get(option["security_id"])
-        if price is None and config.tracking_source == "OPTION":
+
+        if price is None and trigger.get("price") is not None and config.price_source == "OPTION":
+            price = trigger["price"]
+
+        if price is None and candle is not None and config.tracking_source == "OPTION":
             price = float(candle["close"])
 
-        relation = "above" if (config.tracking_source == "INDEX" and config.option_type == "PE") else "below"
-        source = "NIFTY" if config.tracking_source == "INDEX" else option["symbol"]
+        if reason == "INDICATOR":
+            value = trigger["indicator_value"]
+            relation = "above" if (config.tracking_source == "INDEX" and config.option_type == "PE") else "below"
+            source = "NIFTY" if config.tracking_source == "INDEX" else option["symbol"]
 
-        if config.indicator == "HALFTREND":
-            direction = "up" if relation == "above" else "down"
-            condition = f"HalfTrend trend is {direction}"
+            if config.indicator == "HALFTREND":
+                direction = "up" if relation == "above" else "down"
+                condition = f"HalfTrend trend is {direction}"
+            else:
+                condition = f"closed {relation} {config.indicator}"
+
+            what = (
+                f"{source} {config.timeframe}m candle {candle['timestamp']} "
+                f"{condition} "
+                f"(close {float(candle['close']):.2f}, {config.indicator} {value:.2f})"
+            )
         else:
-            condition = f"closed {relation} {config.indicator}"
+            what = trigger["detail"]
 
         message = (
-            f"{source} {config.timeframe}m candle {candle['timestamp']} "
-            f"{condition} "
-            f"(close {float(candle['close']):.2f}, {config.indicator} {indicator_value:.2f}). "
+            f"{what}. "
             f"Exit SELL {config.quantity} {option['symbol']} @ {price if price is not None else 'MKT'}"
         )
 
@@ -206,13 +271,13 @@ class ExitManager:
             print(f"[ExitManager] EXIT ORDER ERROR {monitor_id}: {e}")
             return
 
-        await self._notify_express(monitor_id, price, message)
+        await self._notify_express(monitor_id, price, message, reason)
 
-    async def _notify_express(self, monitor_id, exit_price, message):
+    async def _notify_express(self, monitor_id, exit_price, message, reason):
         await self._call_express(
             "POST",
             f"/api/exitmoniter/{monitor_id}/exit",
-            {"exit_price": exit_price, "message": message},
+            {"exit_price": exit_price, "message": message, "exit_reason": reason},
         )
 
     async def _close_in_express(self, monitor_id, status, message):
